@@ -18,6 +18,7 @@ function compileScss() {
 	// Configure options for sass output. For example, 'expanded' or 'nested'
 	let options = {
 		outputStyle: 'expanded',
+		quietDeps: true
 	};
 	return gulp
 		.src(SYSTEM_SCSS)
