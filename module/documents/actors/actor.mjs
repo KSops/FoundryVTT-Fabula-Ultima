@@ -1,4 +1,5 @@
 import { FUItem } from '../items/item.mjs';
+import { affinityBitmaskGet, affinityBitmaskSet } from '../../helpers/affinity-bitmask.mjs';
 
 /**
  * Extend the base Actor document by defining a custom roll data structure
@@ -256,66 +257,68 @@ export class FUActor extends Actor {
 	async _calculateAffinities(actorData) {
 		const systemData = actorData.system;
 
-		// Initialize an object to store affinities modifiers.
-		const statMods = {};
-
-		Object.keys(systemData.affinities).forEach((attrKey) => (statMods[attrKey] = 0));
-
 		// Check for "Guard" effect
 		const guardEffect = actorData.effects.find((effect) => effect.statuses.size === 1 && effect.statuses.has('guard'));
+		
+		// Initialize an object to store affinity modifiers as bitmasks
+		const statMods = {};
+		for (const [key, attr] of Object.entries(systemData.affinities)) {
+			var bitmask = 0;
+			// Set bitmask flags for base and mod
+			bitmask = affinityBitmaskSet(bitmask, attr.base);
+			bitmask = affinityBitmaskSet(bitmask, attr.bonus);
 
-		// Override all non-positive stats with '1' if "Guard" effect is active, but if mod/bonus is '-1' Vulnerable, set to Normal '0'
-		if (guardEffect) {
-			Object.keys(statMods).forEach((attrKey) => {
-				const currentVal = systemData.affinities[attrKey].current;
-				const baseVal = systemData.affinities[attrKey].base;
-				if (baseVal === -1) {
-					systemData.affinities[attrKey].current = 0; // Vulnerability becomes Normal '0'
-				} else if (currentVal <= 0) {
-					systemData.affinities[attrKey].current = 1; // Set to Resistance by default
-				}
-			});
-		} else {
-			// Iterate through each temporary effect applied to the actor.
-			actorData.effects.forEach((effect) => {
-				// Get the status associated with the effect, if it exists.
-				if (effect.statuses.size === 1) {
-					const status = CONFIG.statusEffects.find((status) => effect.statuses.has(status));
-
-					// If a valid status is found, apply its modifiers to the corresponding attributes.
-					if (status) {
-						const stats = status.stats || [];
-						const mod = status.mod || 0;
-
-						stats.forEach((attrKey) => (statMods[attrKey] += mod));
-					}
-				}
-			});
-
-			// Update the current affinities value with the calculated new value.
-			for (const [key, attr] of Object.entries(systemData.affinities)) {
-				let modVal = statMods[key] + attr.bonus;
-				let baseVal = attr.base;
-				let newVal = baseVal;
-
-				// console.log('Key:', key, ' ModVal:', modVal, ' BaseVal:', baseVal, ' Current:', attr.current);
-
-				// If both Vulnerable and Resistant, becomes Normal
-				if (baseVal === -1 && modVal === 1 || baseVal === 1 && modVal === -1) {
-					newVal = 0;
-				// If modifier is greater than Normal, superscede the value	
-				} else if (modVal > 0) {
-					newVal = modVal;
-				} else {
-					newVal = baseVal += modVal;
-				}
-
-				// Ensure newVal is capped between -1 and 4
-				newVal = Math.max(-1, Math.min(newVal, 4));
-
-				// Set attr.current directly to newVal
-				attr.current = newVal;
+			// Set resistance flag for all affinity bitmasks if guard is active
+			if (guardEffect) {
+				bitmask = affinityBitmaskSet(bitmask, 1);
 			}
+			statMods[key] = bitmask;
+		}
+
+		// Iterate through each temporary effect applied to the actor.
+		actorData.effects.forEach((effect) => {
+			// Get the status associated with the effect, if it exists.
+			if (effect.statuses.size === 1) {
+				const status = CONFIG.statusEffects.find((status) => effect.statuses.has(status));
+
+				// If a valid status is found, apply its modifiers to the corresponding attributes.
+				if (status) {
+					const stats = status.stats || [];
+					const mod = status.mod || 0;
+
+					stats.forEach((attrKey) => statMods[attrKey] = affinityBitmaskSet(statMods[attrKey], mod));
+				}
+			}
+		});
+
+		// Update the current affinities value with the calculated new value.
+		for (const [key, attr] of Object.entries(systemData.affinities)) {
+			let statMod = statMods[key];
+			let newVal = 0;
+
+			// Affinity priority system
+			if (affinityBitmaskGet(statMod, 3)) {
+				// absorb
+				newVal = 3;
+			} else if (affinityBitmaskGet(statMod, 2)) {
+				// immune
+				newVal = 2;
+			} else {
+				let resistance = affinityBitmaskGet(statMod, 1);
+				let vulnerable = affinityBitmaskGet(statMod, -1);
+				if (resistance == vulnerable) {
+					// Either these are cancelled or neither are set.
+					// Both cases result in neutral affinity.
+					newVal = 0;
+				} else if (resistance) {
+					newVal = 1;
+				} else {
+					newVal = -1;
+				}
+			}
+
+			// Set attr.current directly to newVal
+			attr.current = newVal;
 		}
 	}
 
