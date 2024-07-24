@@ -13,7 +13,7 @@ const classInlineLoss = 'inline-loss';
  * @type {TextEditorEnricherConfig}
  */
 const inlineRecoveryEnricher = {
-	pattern: /@HEAL\[(\d+) (\w+?)]|@GAIN\[(\d+) (\w+?)]/g,
+	pattern: /@(?:HEAL|GAIN)\[\s*(\d+\+?)\s*(\w+)\s*\]/gi,
 	enricher: recoveryEnricher,
 };
 
@@ -21,7 +21,7 @@ const inlineRecoveryEnricher = {
  * @type {TextEditorEnricherConfig}
  */
 const inlineLossEnricher = {
-	pattern: /@LOSS\[(\d+) (\w+?)]/g,
+	pattern: /@LOSS\[\s*(\d+)\s*(\w+)\s*\]/gi,
 	enricher: lossEnricher,
 };
 
@@ -43,14 +43,15 @@ const messages = {
 	ip: 'FU.InventoryPointRecoveryMessage',
 };
 
-function createReplacementElement(text, elementClass) {
-	const amount = Number(text[1] ?? text[3]);
-	const type = text[2] ?? text[4];
-
+function createReplacementElement(amount, type, elementClass, uncapped) {
 	if (type in FU.resources && typeof amount === 'number') {
 		const anchor = document.createElement('a');
 		anchor.dataset.type = type;
 		anchor.dataset.amount = amount;
+		// Used to enable over-healing
+		if (uncapped === true) {
+			anchor.dataset.uncapped = 'true';
+		}
 		anchor.draggable = true;
 		anchor.classList.add('inline', elementClass);
 
@@ -72,11 +73,17 @@ function createReplacementElement(text, elementClass) {
 }
 
 function recoveryEnricher(text, options) {
-	return createReplacementElement(text, classInlineRecovery);
+	let uncapped = false;
+	// Detect and handle uncapped recovery
+	if (text[1].match(/^\d+\+$/)) {
+		uncapped = true;
+		text[1] = text[1].slice(0, -1);
+	}
+	return createReplacementElement(parseInt(text[1]), text[2].toLowerCase(), classInlineRecovery, uncapped);
 }
 
 function lossEnricher(text, options) {
-	return createReplacementElement(text, classInlineLoss);
+	return createReplacementElement(parseInt(text[1]), text[2].toLowerCase(), classInlineLoss, false);
 }
 
 /**
@@ -121,6 +128,7 @@ function activateListeners(document, html) {
 		.on('click', function () {
 			const amount = Number(this.dataset.amount);
 			const type = this.dataset.type;
+			const uncapped = this.dataset.uncapped === 'true';
 			const user = game.user;
 			const source = determineSource(document, this);
 			const controlledTokens = canvas.tokens.controlled;
@@ -138,7 +146,7 @@ function activateListeners(document, html) {
 
 			if (actors.length > 0) {
 				if (this.classList.contains(classInlineRecovery)) {
-					actors.forEach((actor) => applyRecovery(actor, type, amount, source || 'inline recovery'));
+					actors.forEach((actor) => applyRecovery(actor, type, amount, source || 'inline recovery', uncapped));
 				} else if (this.classList.contains(classInlineLoss)) {
 					actors.forEach((actor) => applyLoss(actor, type, amount, source || 'inline loss'));
 				}
@@ -159,16 +167,17 @@ function activateListeners(document, html) {
 				source: source,
 				recoveryType: this.dataset.type,
 				amount: this.dataset.amount,
+				uncapped: this.dataset.uncapped === 'true',
 			};
 			event.dataTransfer.setData('text/plain', JSON.stringify(data));
 			event.stopPropagation();
 		});
 }
 
-function onDropActor(actor, sheet, { type, recoveryType, amount, source }) {
+function onDropActor(actor, sheet, { type, recoveryType, amount, source, uncapped }) {
 	amount = Number(amount);
 	if (type === INLINE_RECOVERY && !Number.isNaN(amount)) {
-		applyRecovery(actor, recoveryType, amount, source);
+		applyRecovery(actor, recoveryType, amount, source, uncapped);
 		return false;
 	} else if (type === INLINE_LOSS && !Number.isNaN(amount)) {
 		applyLoss(actor, recoveryType, amount, source);
@@ -176,10 +185,21 @@ function onDropActor(actor, sheet, { type, recoveryType, amount, source }) {
 	}
 }
 
-async function applyRecovery(actor, resource, amount, source) {
+async function applyRecovery(actor, resource, amount, source, uncapped) {
 	const amountRecovered = Math.max(0, amount + actor.system.bonuses.recovery[resource]);
+	const attrKey = `resources.${resource}`;
+	const attr = foundry.utils.getProperty(actor.system, attrKey);
+	const uncappedRecoveryValue = amountRecovered + attr.value;
 	const updates = [];
-	updates.push(actor.modifyTokenAttribute(`resources.${resource}`, amountRecovered, true));
+	if (uncapped === true && uncappedRecoveryValue > attr.max) {
+		// Overheal recovery
+		let newValue = Object.defineProperties({}, Object.getOwnPropertyDescriptors(attr)); // Clone attribute
+		newValue.value = uncappedRecoveryValue;
+		updates.push(actor.modifyTokenAttribute(attrKey, newValue, false, false));
+	} else {
+		// Normal recovery
+		updates.push(actor.modifyTokenAttribute(attrKey, amountRecovered, true));
+	}
 	updates.push(
 		ChatMessage.create({
 			speaker: ChatMessage.getSpeaker({ actor }),
